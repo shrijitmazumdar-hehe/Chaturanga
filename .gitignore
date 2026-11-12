@@ -1,0 +1,5 @@
+/target
+.venv/
+reference/engine_*
+scripts/games.pgn
+__pycache__/
