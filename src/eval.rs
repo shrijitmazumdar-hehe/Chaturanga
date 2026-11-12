@@ -159,6 +159,8 @@ pub fn evaluate(pos: &Chess) -> i32 {
 
 score += passed_pawn_bonus(pos);
 score += king_safety(pos);
+score += king_endgame_adjust(pos);
+score += mop_up(pos);
 
 
     match pos.turn() {
@@ -237,4 +239,104 @@ fn king_safety(pos: &Chess) -> i32 {
         };
     }
     score
+}
+
+const PHASE_MAX: i32 = 24;
+
+// King table for endgames: reward a centralized king. Same layout as PST
+// (White's point of view, rank 8 first).
+#[rustfmt::skip]
+const KING_ENDGAME: [i32; 64] = [
+    -50,-40,-30,-20,-20,-30,-40,-50,
+    -30,-20,-10,  0,  0,-10,-20,-30,
+    -30,-10, 20, 30, 30, 20,-10,-30,
+    -30,-10, 30, 40, 40, 30,-10,-30,
+    -30,-10, 30, 40, 40, 30,-10,-30,
+    -30,-10, 20, 30, 30, 20,-10,-30,
+    -30,-30,  0,  0,  0,  0,-30,-30,
+    -50,-30,-30,-30,-30,-30,-30,-50,
+];
+
+/// 24 with all pieces on the board, 0 with only kings and pawns.
+fn game_phase(pos: &Chess) -> i32 {
+    let board = pos.board();
+    let mut phase = 0;
+    for color in Color::ALL {
+        for (role, weight) in [
+            (Role::Knight, 1),
+            (Role::Bishop, 1),
+            (Role::Rook, 2),
+            (Role::Queen, 4),
+        ] {
+            phase += weight * board.by_piece(Piece { color, role }).count() as i32;
+        }
+    }
+    phase.min(PHASE_MAX)
+}
+
+/// The king table in `PST` is the middlegame one. As pieces come off the board,
+/// blend toward a table that rewards a centralized king.
+fn king_endgame_adjust(pos: &Chess) -> i32 {
+    let board = pos.board();
+    let phase = game_phase(pos);
+    let mut score = 0;
+    for color in Color::ALL {
+        let Some(king) = board.king_of(color) else {
+            continue;
+        };
+        let s = king as usize;
+        let idx = match color {
+            Color::White => s ^ 56,
+            Color::Black => s,
+        };
+        let delta = (KING_ENDGAME[idx] - PST[5][idx]) * (PHASE_MAX - phase) / PHASE_MAX;
+        score += match color {
+            Color::White => delta,
+            Color::Black => -delta,
+        };
+    }
+    score
+}
+
+/// When one side is far ahead in an endgame, reward driving the enemy king to
+/// the edge and bringing the own king close, so the engine makes progress
+/// toward mate instead of shuffling.
+fn mop_up(pos: &Chess) -> i32 {
+    if game_phase(pos) > 12 {
+        return 0;
+    }
+    let board = pos.board();
+    let material = |color: Color| -> i32 {
+        Role::ALL
+            .iter()
+            .map(|&role| VALUE[role_index(role)] * board.by_piece(Piece { color, role }).count() as i32)
+            .sum()
+    };
+    let white = material(Color::White);
+    let black = material(Color::Black);
+    let (strong, weak, diff) = if white >= black {
+        (Color::White, Color::Black, white - black)
+    } else {
+        (Color::Black, Color::White, black - white)
+    };
+    if diff < 400 {
+        return 0;
+    }
+    let (Some(strong_king), Some(weak_king)) = (board.king_of(strong), board.king_of(weak)) else {
+        return 0;
+    };
+
+    let sf = ((strong_king as usize) % 8) as i32;
+    let sr = ((strong_king as usize) / 8) as i32;
+    let wf = ((weak_king as usize) % 8) as i32;
+    let wr = ((weak_king as usize) / 8) as i32;
+
+    let edge = (3 - wf).max(wf - 4) + (3 - wr).max(wr - 4); // 0 in the centre, 6 in a corner
+    let apart = (sf - wf).abs() + (sr - wr).abs(); // distance between the kings
+    let bonus = 20 * edge + 8 * (14 - apart);
+
+    match strong {
+        Color::White => bonus,
+        Color::Black => -bonus,
+    }
 }
