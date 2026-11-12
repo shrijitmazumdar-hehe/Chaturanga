@@ -158,6 +158,7 @@ pub fn evaluate(pos: &Chess) -> i32 {
     }
 
 score += passed_pawn_bonus(pos);
+score += king_safety(pos);
 
 
     match pos.turn() {
@@ -166,3 +167,74 @@ score += passed_pawn_bonus(pos);
     }
 }
 
+
+/// Pawn-shield bonus for each king, applied only while the enemy still has a queen.
+fn king_safety(pos: &Chess) -> i32 {
+    let board = pos.board();
+    let mut score = 0;
+
+    for color in Color::ALL {
+        let enemy = match color {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        };
+        // Only matters while the enemy still has a queen.
+        if board
+            .by_piece(Piece {
+                color: enemy,
+                role: Role::Queen,
+            })
+            .is_empty()
+        {
+            continue;
+        }
+        let Some(king) = board.king_of(color) else {
+            continue;
+        };
+        let king_file = ((king as usize) % 8) as i32;
+        let king_rank = ((king as usize) / 8) as i32;
+
+        // Per file: 2 = pawn directly in front of the king, 1 = pawn two squares
+        // in front, 0 = neither. `ahead` marks files with any pawn in front.
+        let mut shield = [0i32; 8];
+        let mut ahead = [false; 8];
+        for pawn in board.by_piece(Piece {
+            color,
+            role: Role::Pawn,
+        }) {
+            let file = (pawn as usize) % 8;
+            let rank = ((pawn as usize) / 8) as i32;
+            let distance = match color {
+                Color::White => rank - king_rank,
+                Color::Black => king_rank - rank,
+            };
+            if distance >= 1 {
+                ahead[file] = true;
+                if distance == 1 {
+                    shield[file] = 2;
+                } else if distance == 2 && shield[file] == 0 {
+                    shield[file] = 1;
+                }
+            }
+        }
+
+        let mut bonus = 0;
+        for file in (king_file - 1).max(0)..=(king_file + 1).min(7) {
+            let file = file as usize;
+            bonus += match shield[file] {
+                2 => 10,
+                1 => 5,
+                _ => -15,
+            };
+            if !ahead[file] {
+                bonus -= 10;
+            }
+        }
+
+        score += match color {
+            Color::White => bonus,
+            Color::Black => -bonus,
+        };
+    }
+    score
+}
