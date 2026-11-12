@@ -17,8 +17,10 @@ struct Search<'a> {
     stopped: bool,
     tt: &'a mut Tt,
     tt_cutoffs: u64,
+    repetition_draws: u64,
     killers: Vec<[Option<Move>; 2]>, // two killer moves per ply
-    history: Vec<i32>,               // indexed by [color][from][to]
+    history: Vec<i32>,               // move-ordering history, [color][from][to]
+    path: Vec<u64>,                  // hashes of earlier positions: game plus search line
 }
 
 /// Index into the history table, or None for moves without a from-square.
@@ -100,7 +102,7 @@ impl Search<'_> {
     }
 }
 
-fn hash(pos: &Chess) -> u64 {
+pub fn hash(pos: &Chess) -> u64 {
     let h = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal);
     h.0
 }
@@ -194,8 +196,18 @@ fn negamax(
         return 0;
     }
 
-    // Transposition table lookup.
     let key = hash(pos);
+
+    // Repetition: this position already occurred earlier in the game or on the
+    // current search line since the last pawn move or capture. Only the last
+    // `halfmoves` positions can possibly match.
+    let window = pos.halfmoves() as usize;
+    if s.path.iter().rev().take(window).any(|&h| h == key) {
+        s.repetition_draws += 1;
+        return 0;
+    }
+
+    // Transposition table lookup.
     let mut tt_move: Option<Move> = None;
     if let Some(e) = s.tt.probe(key) {
         tt_move = e.best.clone();
@@ -218,13 +230,20 @@ fn negamax(
         return if pos.is_check() { -MATE + ply } else { 0 }; // mate or stalemate
     }
 
+    // Fifty-move rule (checkmate was handled above and takes precedence).
+    if pos.halfmoves() >= 100 {
+        return 0;
+    }
+
     let alpha_orig = alpha;
     let mut best_move: Option<Move> = None;
 
     for m in moves {
         let mut next = pos.clone();
         next.play_unchecked(m.clone());
+        s.path.push(key);
         let score = -negamax(&next, depth - 1, -beta, -alpha, ply + 1, s);
+        s.path.pop();
         if s.stopped {
             return 0;
         }
@@ -259,11 +278,13 @@ fn negamax(
 
 /// Iterative deepening. Returns (best move, score). A depth that is cut off
 /// by the clock is discarded; the last completed depth decides the move.
+/// `game_history` holds the hashes of the positions played before `pos`.
 pub fn search(
     pos: &Chess,
     max_depth: i32,
     limit: Option<Duration>,
     tt: &mut Tt,
+    game_history: &[u64],
 ) -> (Option<Move>, i32) {
     let mut s = Search {
         nodes: 0,
@@ -272,9 +293,13 @@ pub fn search(
         stopped: false,
         tt,
         tt_cutoffs: 0,
+        repetition_draws: 0,
         killers: vec![[None, None]; MAX_PLY as usize],
         history: vec![0; 2 * 64 * 64],
+        path: game_history.to_vec(),
     };
+    // The root position stays on the path for the whole search.
+    s.path.push(hash(pos));
 
     let mut root_moves = s.ordered_moves(pos, None, 0);
     if root_moves.is_empty() {
@@ -329,6 +354,9 @@ pub fn search(
             break;
         }
     }
-    println!("info string tt cutoffs {}", s.tt_cutoffs);
+    println!(
+        "info string tt cutoffs {} repetition draws {}",
+        s.tt_cutoffs, s.repetition_draws
+    );
     (best_move, best_score)
 }

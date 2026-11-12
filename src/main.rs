@@ -11,7 +11,9 @@ use std::time::Duration;
 /// Parses the arguments of a UCI `position` command:
 ///   startpos [moves m1 m2 ...]
 ///   fen <6 FEN fields> [moves m1 m2 ...]
-fn parse_position(args: &[&str]) -> Option<Chess> {
+/// Returns the final position and the hashes of every earlier position in the
+/// game, which the search uses to detect repetitions.
+fn parse_position(args: &[&str]) -> Option<(Chess, Vec<u64>)> {
     let (mut pos, next) = match args.first() {
         Some(&"startpos") => (Chess::default(), 1),
         Some(&"fen") => {
@@ -23,14 +25,16 @@ fn parse_position(args: &[&str]) -> Option<Chess> {
         _ => return None,
     };
 
+    let mut history = Vec::new();
     if args.get(next) == Some(&"moves") {
         for token in &args[next + 1..] {
             let uci: UciMove = token.parse().ok()?;
             let mv = uci.to_move(&pos).ok()?; // fails if the move is illegal here
+            history.push(search::hash(&pos));
             pos.play_unchecked(mv);
         }
     }
-    Some(pos)
+    Some((pos, history))
 }
 
 /// Turns the arguments of `go` into (max depth, time limit).
@@ -64,6 +68,7 @@ fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut pos = Chess::default();
+    let mut history: Vec<u64> = Vec::new();
     let mut tt = tt::Tt::new();
 
     for line in stdin.lock().lines() {
@@ -75,22 +80,26 @@ fn main() {
 
         match tokens.first().copied() {
             Some("uci") => {
-                println!("id name Chaturanga 0.2");
+                println!("id name Chaturanga 0.3-dev");
                 println!("id author shrijitm");
                 println!("uciok");
             }
             Some("isready") => println!("readyok"),
             Some("ucinewgame") => {
                 pos = Chess::default();
+                history.clear();
                 tt.clear();
             }
             Some("position") => match parse_position(&tokens[1..]) {
-                Some(p) => pos = p,
+                Some((p, h)) => {
+                    pos = p;
+                    history = h;
+                }
                 None => eprintln!("error: could not parse position"),
             },
             Some("go") => {
                 let (depth, limit) = go_limits(&tokens, pos.turn() == Color::White);
-                let (best, _score) = search::search(&pos, depth, limit, &mut tt);
+                let (best, _score) = search::search(&pos, depth, limit, &mut tt, &history);
                 match best {
                     Some(m) => println!("bestmove {}", m.to_uci(CastlingMode::Standard)),
                     None => println!("bestmove 0000"),
@@ -105,6 +114,7 @@ fn main() {
                     .collect();
                 println!("{} legal moves: {}", moves.len(), moves.join(" "));
             }
+            // Custom debug command (not part of UCI)
             Some("perft") => {
                 let d: u32 = tokens.get(1).and_then(|t| t.parse().ok()).unwrap_or(1);
                 println!("nodes {}", perft(&pos, d));
