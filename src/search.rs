@@ -1,4 +1,4 @@
-use crate::eval::{evaluate, role_index, VALUE};
+use crate::eval::{VALUE, evaluate, role_index};
 use crate::tt::{Bound, Tt};
 use shakmaty::zobrist::Zobrist64;
 use shakmaty::{Chess, Color, EnPassantMode, Move, Position};
@@ -34,12 +34,11 @@ impl Search<'_> {
     /// Called once per node; checks the clock every 2048 nodes.
     fn tick(&mut self) {
         self.nodes += 1;
-        if self.nodes & 2047 == 0 {
-            if let Some(limit) = self.limit {
-                if self.start.elapsed() >= limit {
-                    self.stopped = true;
-                }
-            }
+        if self.nodes & 2047 == 0
+            && let Some(limit) = self.limit
+            && self.start.elapsed() >= limit
+        {
+            self.stopped = true;
         }
     }
 
@@ -48,7 +47,7 @@ impl Search<'_> {
         let p = ply as usize;
         if p < self.killers.len() && self.killers[p][0].as_ref() != Some(m) {
             self.killers[p][1] = self.killers[p][0].take();
-            self.killers[p][0] = Some(m.clone());
+            self.killers[p][0] = Some(*m);
         }
         if let Some(i) = history_index(color, m) {
             self.history[i] = (self.history[i] + depth * depth).min(HISTORY_MAX);
@@ -92,11 +91,11 @@ impl Search<'_> {
             .collect();
         scored.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
         let mut moves: Vec<Move> = scored.into_iter().map(|(_, m)| m).collect();
-        if let Some(fm) = first {
-            if let Some(i) = moves.iter().position(|m| m == fm) {
-                let mv = moves.remove(i);
-                moves.insert(0, mv);
-            }
+        if let Some(fm) = first
+            && let Some(i) = moves.iter().position(|m| m == fm)
+        {
+            let mv = moves.remove(i);
+            moves.insert(0, mv);
         }
         moves
     }
@@ -105,6 +104,18 @@ impl Search<'_> {
 pub fn hash(pos: &Chess) -> u64 {
     let h = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal);
     h.0
+}
+
+fn tt_hash(pos: &Chess) -> u64 {
+    let key = hash(pos);
+    let halfmoves = pos.halfmoves();
+
+    // Reuse entries across clocks when the search horizon cannot reach 100.
+    if halfmoves.saturating_add(MAX_PLY as u32) < 100 {
+        key
+    } else {
+        key ^ (halfmoves as u64).wrapping_mul(0x9E3779B97F4A7C15)
+    }
 }
 
 // Mate scores depend on the distance from the root, so they are stored in the
@@ -134,18 +145,39 @@ fn quiescence(pos: &Chess, mut alpha: i32, beta: i32, ply: i32, s: &mut Search<'
     if s.stopped {
         return 0;
     }
+
+    let in_check = pos.is_check();
+    let mut moves = s.ordered_moves(pos, None, ply);
+
+    // Detect mate and stalemate before evaluating the position.
+    if moves.is_empty() {
+        return if in_check { -MATE + ply } else { 0 };
+    }
+
+    if pos.is_insufficient_material() || pos.halfmoves() >= 100 {
+        return 0;
+    }
+
+    // The current position plus two earlier occurrences is a threefold draw.
+    let key = hash(pos);
+    let window = pos.halfmoves() as usize;
+    let previous_matches = s
+        .path
+        .iter()
+        .rev()
+        .take(window)
+        .filter(|&&h| h == key)
+        .count();
+    if previous_matches >= 2 {
+        s.repetition_draws += 1;
+        return 0;
+    }
+
     if ply >= MAX_PLY {
         return evaluate(pos);
     }
 
-    let moves: Vec<Move> = if pos.is_check() {
-        // In check there is no "stand pat": every legal move is an evasion.
-        let moves = s.ordered_moves(pos, None, ply);
-        if moves.is_empty() {
-            return -MATE + ply; // checkmated
-        }
-        moves
-    } else {
+    if !in_check {
         let stand_pat = evaluate(pos);
         if stand_pat >= beta {
             return beta;
@@ -153,16 +185,16 @@ fn quiescence(pos: &Chess, mut alpha: i32, beta: i32, ply: i32, s: &mut Search<'
         if stand_pat > alpha {
             alpha = stand_pat;
         }
-        s.ordered_moves(pos, None, ply)
-            .into_iter()
-            .filter(|m| m.is_capture() || m.is_promotion())
-            .collect()
-    };
+        moves.retain(|m| m.is_capture() || m.is_promotion());
+    }
 
     for m in moves {
         let mut next = pos.clone();
         next.play_unchecked(m);
+        s.path.push(key);
         let score = -quiescence(&next, -beta, -alpha, ply + 1, s);
+        s.path.pop();
+
         if s.stopped {
             return 0;
         }
@@ -196,21 +228,37 @@ fn negamax(
         return 0;
     }
 
+    // A fifty-move draw takes priority over cached scores, except checkmate.
+    if pos.halfmoves() >= 100 {
+        if pos.is_check() && pos.legal_moves().is_empty() {
+            return -MATE + ply;
+        }
+        return 0;
+    }
+
     let key = hash(pos);
+    let tt_key = tt_hash(pos);
 
     // Repetition: this position already occurred earlier in the game or on the
     // current search line since the last pawn move or capture. Only the last
     // `halfmoves` positions can possibly match.
     let window = pos.halfmoves() as usize;
-    if s.path.iter().rev().take(window).any(|&h| h == key) {
+    let previous_matches = s
+        .path
+        .iter()
+        .rev()
+        .take(window)
+        .filter(|&&h| h == key)
+        .count();
+    if previous_matches >= 2 {
         s.repetition_draws += 1;
         return 0;
     }
 
     // Transposition table lookup.
     let mut tt_move: Option<Move> = None;
-    if let Some(e) = s.tt.probe(key) {
-        tt_move = e.best.clone();
+    if let Some(e) = s.tt.probe(tt_key) {
+        tt_move = e.best;
         if e.depth >= depth {
             let sc = score_from_tt(e.score, ply);
             let usable = match e.bound {
@@ -230,30 +278,41 @@ fn negamax(
         return if pos.is_check() { -MATE + ply } else { 0 }; // mate or stalemate
     }
 
-    // Fifty-move rule (checkmate was handled above and takes precedence).
-    if pos.halfmoves() >= 100 {
-        return 0;
-    }
-
     let alpha_orig = alpha;
     let mut best_move: Option<Move> = None;
 
+    let mut first_move = true;
     for m in moves {
         let mut next = pos.clone();
-        next.play_unchecked(m.clone());
+        next.play_unchecked(m);
         s.path.push(key);
-        let score = -negamax(&next, depth - 1, -beta, -alpha, ply + 1, s);
+
+        let mut score = if first_move {
+            -negamax(&next, depth - 1, -beta, -alpha, ply + 1, s)
+        } else {
+            -negamax(&next, depth - 1, -alpha - 1, -alpha, ply + 1, s)
+        };
+        if !first_move && !s.stopped && score > alpha && score < beta {
+            score = -negamax(&next, depth - 1, -beta, -alpha, ply + 1, s);
+        }
+
         s.path.pop();
         if s.stopped {
             return 0;
         }
+        first_move = false;
         if score >= beta {
             if !m.is_capture() && !m.is_promotion() {
                 s.record_cutoff(&m, pos.turn(), depth, ply);
             }
-            s.tt
-                .store(key, depth, score_to_tt(score, ply), Bound::Lower, Some(m));
-            return beta;
+            s.tt.store(
+                tt_key,
+                depth,
+                score_to_tt(score, ply),
+                Bound::Lower,
+                Some(m),
+            );
+            return score;
         }
         if score > alpha {
             alpha = score;
@@ -267,7 +326,7 @@ fn negamax(
         Bound::Upper
     };
     s.tt.store(
-        key,
+        tt_key,
         depth,
         score_to_tt(alpha, ply),
         bound,
@@ -315,16 +374,27 @@ pub fn search(
 
         let mut alpha = -INF;
         let mut iter_best: Option<Move> = None;
+        let mut first_move = true;
         for m in &root_moves {
             let mut next = pos.clone();
-            next.play_unchecked(m.clone());
-            let score = -negamax(&next, depth - 1, -INF, -alpha, 1, &mut s);
+            next.play_unchecked(*m);
+
+            let mut score = if first_move {
+                -negamax(&next, depth - 1, -INF, -alpha, 1, &mut s)
+            } else {
+                -negamax(&next, depth - 1, -alpha - 1, -alpha, 1, &mut s)
+            };
+            if !first_move && !s.stopped && score > alpha {
+                score = -negamax(&next, depth - 1, -INF, -alpha, 1, &mut s);
+            }
+
             if s.stopped {
                 break;
             }
+            first_move = false;
             if iter_best.is_none() || score > alpha {
                 alpha = score;
-                iter_best = Some(m.clone());
+                iter_best = Some(*m);
             }
         }
         if s.stopped {
@@ -335,18 +405,18 @@ pub fn search(
         best_score = alpha;
 
         let ms = s.start.elapsed().as_millis() as u64;
-        let nps = if ms > 0 { s.nodes * 1000 / ms } else { 0 };
+        let nps = s.nodes.saturating_mul(1000).checked_div(ms).unwrap_or(0);
         println!(
             "info depth {depth} score cp {best_score} nodes {} time {ms} nps {nps}",
             s.nodes
         );
 
         // Search the best move first at the next depth.
-        if let Some(bm) = &best_move {
-            if let Some(i) = root_moves.iter().position(|m| m == bm) {
-                let mv = root_moves.remove(i);
-                root_moves.insert(0, mv);
-            }
+        if let Some(bm) = &best_move
+            && let Some(i) = root_moves.iter().position(|m| m == bm)
+        {
+            let mv = root_moves.remove(i);
+            root_moves.insert(0, mv);
         }
 
         // A forced mate has been found; deeper search won't change the result.
@@ -359,4 +429,108 @@ pub fn search(
         s.tt_cutoffs, s.repetition_draws
     );
     (best_move, best_score)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shakmaty::CastlingMode;
+    use shakmaty::fen::Fen;
+
+    fn position(fen_text: &str) -> Chess {
+        let fen: Fen = fen_text.parse().unwrap();
+        let pos: Chess = fen.into_position(CastlingMode::Standard).unwrap();
+        pos
+    }
+
+    fn test_search<'a>(tt: &'a mut Tt, path: Vec<u64>) -> Search<'a> {
+        Search {
+            nodes: 0,
+            start: Instant::now(),
+            limit: None,
+            stopped: false,
+            tt,
+            tt_cutoffs: 0,
+            repetition_draws: 0,
+            killers: vec![[None, None]; MAX_PLY as usize],
+            history: vec![0; 2 * 64 * 64],
+            path,
+        }
+    }
+
+    #[test]
+    fn quiescence_scores_stalemate_as_draw() {
+        let pos = position("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1");
+        assert!(!pos.is_check());
+        assert!(pos.legal_moves().is_empty());
+
+        let mut tt = Tt::with_bits(8);
+        let mut s = test_search(&mut tt, Vec::new());
+        assert_eq!(quiescence(&pos, -INF, INF, 0, &mut s), 0);
+    }
+
+    #[test]
+    fn quiescence_scores_insufficient_material_as_draw() {
+        let pos = position("7k/8/5K2/8/8/8/8/6B1 w - - 0 1");
+        assert!(pos.is_insufficient_material());
+
+        let mut tt = Tt::with_bits(8);
+        let mut s = test_search(&mut tt, Vec::new());
+        assert_eq!(quiescence(&pos, -INF, INF, 0, &mut s), 0);
+    }
+
+    #[test]
+    fn quiescence_scores_fifty_move_position_as_draw() {
+        let pos = position("7k/8/5K2/8/8/8/8/6R1 w - - 100 1");
+        assert!(!pos.legal_moves().is_empty());
+
+        let mut tt = Tt::with_bits(8);
+        let mut s = test_search(&mut tt, Vec::new());
+        assert_eq!(quiescence(&pos, -INF, INF, 0, &mut s), 0);
+    }
+
+    #[test]
+    fn one_previous_occurrence_is_not_threefold() {
+        let pos = position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 10 6");
+        let key = hash(&pos);
+
+        let mut tt = Tt::with_bits(8);
+        let mut s = test_search(&mut tt, vec![key]);
+        quiescence(&pos, -INF, INF, 0, &mut s);
+        assert_eq!(s.repetition_draws, 0);
+    }
+
+    #[test]
+    fn two_previous_occurrences_are_threefold() {
+        let pos = position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 10 6");
+        let key = hash(&pos);
+
+        let mut tt = Tt::with_bits(8);
+        let mut s = test_search(&mut tt, vec![key, key]);
+        assert_eq!(quiescence(&pos, -INF, INF, 0, &mut s), 0);
+        assert_eq!(s.repetition_draws, 1);
+    }
+
+    #[test]
+    fn transposition_keys_respect_the_fifty_move_horizon() {
+        let early = position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 10 6");
+        let safe = position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 35 18");
+        let near_draw = position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 36 19");
+        let late = position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 99 50");
+
+        assert_eq!(hash(&early), hash(&safe));
+        assert_eq!(hash(&early), hash(&near_draw));
+        assert_eq!(tt_hash(&early), tt_hash(&safe));
+        assert_ne!(tt_hash(&early), tt_hash(&near_draw));
+        assert_ne!(tt_hash(&near_draw), tt_hash(&late));
+    }
+    #[test]
+    fn fifty_move_draw_overrides_cached_score() {
+        let pos = position("7k/8/5K2/8/8/8/8/6R1 w - - 100 1");
+        let mut tt = Tt::with_bits(8);
+        tt.store(tt_hash(&pos), 8, 777, Bound::Exact, None);
+
+        let mut s = test_search(&mut tt, Vec::new());
+        assert_eq!(negamax(&pos, 1, -INF, INF, 0, &mut s), 0);
+    }
 }

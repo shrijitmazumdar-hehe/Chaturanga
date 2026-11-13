@@ -51,10 +51,11 @@ impl Tt {
     pub fn store(&mut self, key: u64, depth: i32, score: i32, bound: Bound, best: Option<Move>) {
         let slot = &mut self.entries[(key as usize) & self.mask];
         // Don't overwrite a deeper result for the same position.
-        if let Some(old) = slot.as_ref() {
-            if old.key == key && old.depth > depth {
-                return;
-            }
+        if let Some(old) = slot.as_ref()
+            && old.key == key
+            && old.depth > depth
+        {
+            return;
         }
         *slot = Some(Entry {
             key,

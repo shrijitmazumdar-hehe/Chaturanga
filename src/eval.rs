@@ -98,7 +98,8 @@ fn passed_pawn_bonus(pos: &Chess) -> i32 {
                     color: enemy,
                     role: Role::Pawn,
                 })
-                .into_iter().any(|other| {
+                .into_iter()
+                .any(|other| {
                     let other = other as usize;
                     let other_file = other % 8;
                     let other_rank = other / 8;
@@ -157,18 +158,17 @@ pub fn evaluate(pos: &Chess) -> i32 {
         }
     }
 
-score += passed_pawn_bonus(pos);
-score += king_safety(pos);
-score += king_endgame_adjust(pos);
-score += mop_up(pos);
-
+    let phase = game_phase(pos);
+    score += passed_pawn_bonus(pos);
+    score += king_safety(pos);
+    score += king_endgame_adjust(pos, phase);
+    score += mop_up(pos, phase);
 
     match pos.turn() {
         Color::White => score,
         Color::Black => -score,
     }
 }
-
 
 /// Pawn-shield bonus for each king, applied only while the enemy still has a queen.
 fn king_safety(pos: &Chess) -> i32 {
@@ -276,9 +276,8 @@ fn game_phase(pos: &Chess) -> i32 {
 
 /// The king table in `PST` is the middlegame one. As pieces come off the board,
 /// blend toward a table that rewards a centralized king.
-fn king_endgame_adjust(pos: &Chess) -> i32 {
+fn king_endgame_adjust(pos: &Chess, phase: i32) -> i32 {
     let board = pos.board();
-    let phase = game_phase(pos);
     let mut score = 0;
     for color in Color::ALL {
         let Some(king) = board.king_of(color) else {
@@ -301,15 +300,17 @@ fn king_endgame_adjust(pos: &Chess) -> i32 {
 /// When one side is far ahead in an endgame, reward driving the enemy king to
 /// the edge and bringing the own king close, so the engine makes progress
 /// toward mate instead of shuffling.
-fn mop_up(pos: &Chess) -> i32 {
-    if game_phase(pos) > 12 {
+fn mop_up(pos: &Chess, phase: i32) -> i32 {
+    if phase > 12 {
         return 0;
     }
     let board = pos.board();
     let material = |color: Color| -> i32 {
         Role::ALL
             .iter()
-            .map(|&role| VALUE[role_index(role)] * board.by_piece(Piece { color, role }).count() as i32)
+            .map(|&role| {
+                VALUE[role_index(role)] * board.by_piece(Piece { color, role }).count() as i32
+            })
             .sum()
     };
     let white = material(Color::White);

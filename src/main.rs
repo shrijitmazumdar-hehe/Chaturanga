@@ -17,7 +17,10 @@ fn parse_position(args: &[&str]) -> Option<(Chess, Vec<u64>)> {
     let (mut pos, next) = match args.first() {
         Some(&"startpos") => (Chess::default(), 1),
         Some(&"fen") => {
-            let end = args.iter().position(|&t| t == "moves").unwrap_or(args.len());
+            let end = args
+                .iter()
+                .position(|&t| t == "moves")
+                .unwrap_or(args.len());
             let fen: Fen = args[1..end].join(" ").parse().ok()?;
             let pos: Chess = fen.into_position(CastlingMode::Standard).ok()?;
             (pos, end)
@@ -59,7 +62,10 @@ fn go_limits(tokens: &[&str], white_to_move: bool) -> (i32, Option<Duration>) {
     if let Some(t) = time {
         let moves_left = get("movestogo").unwrap_or(30).max(1);
         let budget = (t / moves_left + inc.unwrap_or(0) / 2).min(t / 2);
-        return (search::MAX_DEPTH, Some(Duration::from_millis(budget.max(10))));
+        return (
+            search::MAX_DEPTH,
+            Some(Duration::from_millis(budget.max(10))),
+        );
     }
     (search::MAX_DEPTH, Some(Duration::from_millis(1000)))
 }
