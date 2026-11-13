@@ -319,7 +319,7 @@ fn mop_up(pos: &Chess) -> i32 {
     } else {
         (Color::Black, Color::White, black - white)
     };
-    if diff < 400 {
+    if diff < 400 || board.by_color(weak).count() != 1 {
         return 0;
     }
     let (Some(strong_king), Some(weak_king)) = (board.king_of(strong), board.king_of(weak)) else {
@@ -333,7 +333,7 @@ fn mop_up(pos: &Chess) -> i32 {
 
     let edge = (3 - wf).max(wf - 4) + (3 - wr).max(wr - 4); // 0 in the centre, 6 in a corner
     let apart = (sf - wf).abs() + (sr - wr).abs(); // distance between the kings
-    let bonus = 20 * edge + 8 * (14 - apart);
+    let bonus = 40 * edge + 10 * (14 - apart);
 
     match strong {
         Color::White => bonus,
