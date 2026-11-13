@@ -3,3 +3,5 @@
 reference/engine_*
 scripts/games.pgn
 __pycache__/
+
+scripts/match.log
