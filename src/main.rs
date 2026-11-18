@@ -86,7 +86,7 @@ fn main() {
 
         match tokens.first().copied() {
             Some("uci") => {
-                println!("id name Chaturanga 0.3-dev");
+                println!("id name Chaturanga 0.3.0-dev");
                 println!("id author shrijitm");
                 println!("uciok");
             }

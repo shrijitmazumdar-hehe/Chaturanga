@@ -1,7 +1,10 @@
 [package]
 name = "chaturanga"
-version = "0.1.0"
+version = "0.3.0-dev"
 edition = "2024"
+description = "A UCI chess engine written in Rust"
+readme = "README.md"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 shakmaty = "0.30.2"
