@@ -147,7 +147,7 @@ fn quiescence(pos: &Chess, mut alpha: i32, beta: i32, ply: i32, s: &mut Search<'
     }
 
     let in_check = pos.is_check();
-    let mut moves = s.ordered_moves(pos, None, ply);
+    let mut moves: Vec<Move> = pos.legal_moves().into_iter().collect();
 
     // Detect mate and stalemate before evaluating the position.
     if moves.is_empty() {
@@ -187,6 +187,10 @@ fn quiescence(pos: &Chess, mut alpha: i32, beta: i32, ply: i32, s: &mut Search<'
         }
         moves.retain(|m| m.is_capture() || m.is_promotion());
     }
+
+    let color = pos.turn();
+    let killers = s.killers.get(ply as usize);
+    moves.sort_by_key(|m| std::cmp::Reverse(s.move_score(m, color, killers)));
 
     for m in moves {
         let mut next = pos.clone();

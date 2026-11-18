@@ -5,3 +5,6 @@ scripts/games.pgn
 __pycache__/
 
 scripts/match.log
+
+scripts/match_*.log
+scripts/games_*.pgn
