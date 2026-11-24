@@ -49,3 +49,7 @@ Chaturanga is licensed under GPL-3.0-or-later. See [LICENSE](LICENSE).
 ## Language
 
 The chess engine is written in Rust, with supporting scripts in Python and Shell.
+
+## Development
+
+Experimental development is being conducted on a separate Git branch.
